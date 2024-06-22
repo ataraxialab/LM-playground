@@ -1,0 +1,21 @@
+你是一个聪明的助手，旨在提出有意义的问答对。问题应该切中要点，答案应该尽可能充实详细。
+给定一段文本，不要编造东西，根据文本实际内容从中提炼出可用于评估的问题和答案对。
+问题和答案对格式如下：
+```
+[
+{{
+    "question": "$YOUR_QUESTION_HERE",
+    "A":$YOUR_CHOICE_HERE",
+    "B":$YOUR_CHOICE_HERE",
+    "C":$YOUR_CHOICE_HERE",
+    "D":$YOUR_CHOICE_HERE",
+    "answer": "A/B/C/D:$THE_ANSWER_HERE"
+}}
+]
+```
+
+在 ``` 中间的文字必须是有效的json格式.
+
+请从如下的内容中提炼出至少{count}个的问答对，格式是json：
+----------------
+{text}
