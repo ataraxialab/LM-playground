@@ -2,7 +2,7 @@ import gradio as gr
 from gradio_pdf import PDF
 import fitz
 from chat import ChatModel
-
+import time
 
 def _launch_demo(model, template):
     pdftxt = []
@@ -62,6 +62,7 @@ def _launch_demo(model, template):
 
         message = {"role": "user", "content": chat_query}
         respones = ""
+        start_time = time.time()
         for new_text in model.stream_chat([message]):
             respones += new_text
             #print(respones)
@@ -69,6 +70,9 @@ def _launch_demo(model, template):
             #print(_chatbot)
             #_chatbot += (p, new_text)
             yield _chatbot
+        end_time = time.time()
+        execution_time = end_time - start_time
+        print(f"代码运行时间: {execution_time} 秒")
         return _chatbot
 
 
@@ -125,7 +129,7 @@ def _launch_demo(model, template):
         QA_bad.click(logQA, [chatbot,QA_bad], [])
         #run.click(makeQA, [chatbot, content], [chatbot], show_progress=True)
 
-    demo.launch(server_name="0.0.0.0" ,server_port=8504)
+    demo.launch(server_name="127.0.0.1" ,server_port=6006)
 
 
 if __name__ == '__main__':
@@ -134,19 +138,42 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--model_name_or_path', type=str, default="/workspace/mnt/storage/zhaozhijian/pt-fs/Qwen1___5-7B-Chat/")
+
+    parser.add_argument('--model_name_or_path', type=str, default="/workspace/mnt/storage/xiangxin/llm_storge/qwen1.5-7b-lora/examples/qwen/tmp/Qwen1.5-7B")
+    # parser.add_argument('--model_name_or_path', type=str, default="/root/autodl-tmp/1-gpu/")
     parser.add_argument('--template', type=str, default="qwen")
     parser.add_argument('--prompt_path', type=str, default="template/QAtemplat.txt")
+    parser.add_argument('--trt_llm', type=str, default='1', help='An optional parameter with a default empty string.')
 
     args = parser.parse_args()
 
     with open(args.prompt_path, 'r') as f:
         template = ''.join(f.readlines())
-    
+
+
+    if args.trt_llm != '':
+        parser.add_argument('--max_output_len', type=int, default=2048)
+        parser.add_argument(
+            '--tokenizer_dir',
+            type=str,
+            default='/workspace/mnt/storage/xiangxin/llm_storge/qwen1.5-7b-lora/examples/qwen/tmp/Qwen1.5-7B'
+        )
+        parser.add_argument(
+            '--engine_dir',
+            type=str,
+            default='/workspace/mnt/storage/xiangxin/llm_storge/qwen1.5-7b-lora/examples/qwen/tmp/qwen/7B/trt_engines/fp16/1-gpu'
+        )
+        parser.add_argument(
+            '--input_text',
+            type=str,
+            nargs='+',
+            default=["你好，请问你叫什么？"]
+        )
+
+        args = parser.parse_args()
+
     #print(vars(args).keys())
 
     model = ChatModel(vars(args))
 
     _launch_demo(model, template)
-
-
