@@ -1,11 +1,13 @@
 import asyncio
 from threading import Thread
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, Generator, List, Optional, Sequence
 
 from .hparams import get_infer_args
 from .hf_engine import HuggingfaceEngine
 from .vllm_engine import VllmEngine
-
+from chat import run
+from chat.trt_llm_engine import trtLLMQwen
 
 if TYPE_CHECKING:
     from .base_engine import BaseEngine, Response
@@ -18,13 +20,32 @@ def _start_background_loop(loop: asyncio.AbstractEventLoop) -> None:
 
 class ChatModel:
     def __init__(self, args: Optional[Dict[str, Any]] = None) -> None:
-        model_args, data_args, finetuning_args, generating_args = get_infer_args(args)
-        if model_args.infer_backend == "huggingface":
-            self.engine: "BaseEngine" = HuggingfaceEngine(model_args, data_args, finetuning_args, generating_args)
-        elif model_args.infer_backend == "vllm":
-            self.engine: "BaseEngine" = VllmEngine(model_args, data_args, finetuning_args, generating_args)
+        if args['trt_llm'] == '':
+            del args['trt_llm']
+            model_args, data_args, finetuning_args, generating_args = get_infer_args(args)
+            if model_args.infer_backend == "huggingface":
+                self.engine: "BaseEngine" = HuggingfaceEngine(model_args, data_args, finetuning_args, generating_args)
+            elif model_args.infer_backend == "vllm":
+                self.engine: "BaseEngine" = VllmEngine(model_args, data_args, finetuning_args, generating_args)
+            else:
+                raise NotImplementedError("Unknown backend: {}".format(model_args.infer_backend))
         else:
-            raise NotImplementedError("Unknown backend: {}".format(model_args.infer_backend))
+            # 不用更新
+            trt_llm_args = run.parse_arguments(args_copy=args)
+
+            args_copy = SimpleNamespace(**args)
+
+            args, is_enc_dec, runtime_rank, tokenizer, end_id, pad_id, stop_words_list, bad_words_list, model_name, model_version, prompt_template = run.get_trt_llm_base_args(
+                trt_llm_args)
+
+            self.engine: "BaseEngine" = trtLLMQwen(args_copy=args_copy, args=args,
+                                                   trt_llm_args=trt_llm_args,
+                                                   is_enc_dec=is_enc_dec, runtime_rank=runtime_rank,
+                                                   tokenizer=tokenizer, end_id=end_id, pad_id=pad_id,
+                                                   stop_words_list=stop_words_list,
+                                                   bad_words_list=bad_words_list, model_name=model_name,
+                                                   model_version=model_version, prompt_template=prompt_template
+                                                   )
 
         self._loop = asyncio.new_event_loop()
         self._thread = Thread(target=_start_background_loop, args=(self._loop,), daemon=True)
