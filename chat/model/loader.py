@@ -1,6 +1,7 @@
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Optional
+from pathlib import Path
 
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer, T5Tokenizer
 from trl import AutoModelForCausalLMWithValueHead
 
 from ..extras.logging import get_logger
@@ -45,6 +46,61 @@ def load_tokenizer(model_args: "ModelArguments") -> "PreTrainedTokenizer":
     )
     patch_tokenizer(tokenizer)
     return tokenizer
+
+
+def load_tokenizer_trt(tokenizer_dir: Optional[str] = None,
+                   vocab_file: Optional[str] = None,
+                   model_name: str = 'GPTForCausalLM',
+                   model_version: Optional[str] = None,
+                   tokenizer_type: Optional[str] = None):
+    if vocab_file is None:
+        use_fast = True
+        if tokenizer_type is not None and tokenizer_type == "llama":
+            use_fast = False
+        # Should set both padding_side and truncation_side to be 'left'
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir,
+                                                  legacy=False,
+                                                  padding_side='left',
+                                                  truncation_side='left',
+                                                  trust_remote_code=True,
+                                                  tokenizer_type=tokenizer_type,
+                                                  use_fast=use_fast)
+    elif model_name == 'GemmaForCausalLM' or model_name == 'RecurrentGemmaForCausalLM':
+        from transformers import GemmaTokenizer
+
+        # Initialize tokenizer from vocab file.
+        tokenizer = GemmaTokenizer(vocab_file=vocab_file,
+                                   padding_side='left',
+                                   truncation_side='left',
+                                   legacy=False)
+    elif model_name == 'Grok1ModelForCausalLM':
+        tokenizer = LlamaTokenizer(vocab_file=vocab_file,
+                                   padding_side='left',
+                                   truncation_side='left',
+                                   legacy=False,
+                                   use_fast=False)
+    else:
+        # For gpt-next, directly load from tokenizer.model
+        tokenizer = T5Tokenizer(vocab_file=vocab_file,
+                                padding_side='left',
+                                truncation_side='left',
+                                legacy=False)
+    if model_name == 'QWenForCausalLM' and model_version == 'qwen':
+        import json
+        with open(Path(tokenizer_dir) / "generation_config.json") as f:
+            gen_config = json.load(f)
+        pad_id = gen_config['pad_token_id']
+        end_id = gen_config['eos_token_id']
+    elif model_name == 'ChatGLMForCausalLM' and model_version == 'glm':
+        pad_id = tokenizer.pad_token_id
+        end_id = tokenizer.eop_token_id
+    else:
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        pad_id = tokenizer.pad_token_id
+        end_id = tokenizer.eos_token_id
+
+    return tokenizer, pad_id, end_id
 
 
 def load_model(

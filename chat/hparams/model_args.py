@@ -17,6 +17,20 @@ class ModelArguments:
         default=None,
         metadata={"help": "Path to the adapter weight or identifier from huggingface.co/models."},
     )
+    
+    tokenizer_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to the tokenizer"},
+    )
+    vocab_file: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to vocab_file"},
+    )
+    tokenizer_type: Optional[str] = field(
+        default=None,
+        metadata={"help": "Specify that argument when providing a .model file as the tokenizer_dir. "
+        "It allows AutoTokenizer to instantiate the correct tokenizer type."},
+    )   
     cache_dir: Optional[str] = field(
         default=None,
         metadata={"help": "Where to store the pre-trained models downloaded from huggingface.co or modelscope.cn."},
@@ -89,7 +103,7 @@ class ModelArguments:
         default=False,
         metadata={"help": "Whether or not to upcast the output of lm_head in fp32."},
     )
-    infer_backend: Literal["huggingface", "vllm"] = field(
+    infer_backend: Literal["huggingface", "vllm", "trt-llm"] = field(
         default="huggingface",
         metadata={"help": "Backend engine used at inference."},
     )
