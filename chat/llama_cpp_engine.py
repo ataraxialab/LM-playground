@@ -1,14 +1,3 @@
-from .base_engine import BaseEngine
-import argparse
-import torch
-from chat.utils import (DEFAULT_HF_MODEL_DIRS, DEFAULT_PROMPT_TEMPLATES,
-                        add_common_args, load_tokenizer, read_decoder_start_token_id,
-                        read_model_name, supports_inflight_batching,
-                        throttle_generator)
-import ast
-import csv
-import numpy as np
-from pathlib import Path
 import asyncio
 import concurrent.futures
 import os
@@ -18,12 +7,12 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Opt
 import torch
 from transformers import GenerationConfig, TextIteratorStreamer
 
-from .data import get_template_and_fix_tokenizer
-from .extras.misc import get_logits_processor
-from .model import load_model, load_tokenizer
 from .base_engine import BaseEngine, Response
-from llama_cpp import Llama
+from chat.llama_cpp_lm import Llama
 from llama_cpp.llama_tokenizer import LlamaHFTokenizer
+
+
+
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel, PreTrainedTokenizer
@@ -71,7 +60,7 @@ class llamaCppQwen(BaseEngine):
         #     streamer.put(batch_input_ids.cpu())
 
         # input_ids在create_chat_completion转换,tokenizer也在runner里面了
-        x = runner.create_chat_completion(
+        runner.create_chat_completion(
             messages=messages,
             top_p=top_p,
             top_k=top_k,
@@ -80,7 +69,7 @@ class llamaCppQwen(BaseEngine):
             streamer=streamer
         )
 
-        print(x["choices"][0]["message"]["content"])
+        # print(x["choices"][0]["message"]["content"])
 
     @staticmethod
     def _process_args(messages, top_p, top_k, temperature):
