@@ -8,7 +8,7 @@ from .hf_engine import HuggingfaceEngine
 from .vllm_engine import VllmEngine
 from chat import run
 from chat.trt_llm_engine import trtLLMQwen
-
+from .llama_cpp_engine import llamaCppQwen
 if TYPE_CHECKING:
     from .base_engine import BaseEngine, Response
 
@@ -20,13 +20,17 @@ def _start_background_loop(loop: asyncio.AbstractEventLoop) -> None:
 
 class ChatModel:
     def __init__(self, args: Optional[Dict[str, Any]] = None) -> None:
-        if args['trt_llm'] == '':
-            del args['trt_llm']
+        if args['trt_llm_llama'] == '':
+            del args['trt_llm_llama']
             model_args, data_args, finetuning_args, generating_args = get_infer_args(args)
+            model_args.infer_backend = "llama"
             if model_args.infer_backend == "huggingface":
                 self.engine: "BaseEngine" = HuggingfaceEngine(model_args, data_args, finetuning_args, generating_args)
             elif model_args.infer_backend == "vllm":
                 self.engine: "BaseEngine" = VllmEngine(model_args, data_args, finetuning_args, generating_args)
+            elif model_args.infer_backend == "llama":
+                model_name = "/workspace/mnt/storage/xiangxin/trt-llama/llama.cpp/ggml-qwen-chat-f16.gguf"
+                self.engine: "BaseEngine" = llamaCppQwen(model_args, data_args, finetuning_args, generating_args, model_name = model_name)
             else:
                 raise NotImplementedError("Unknown backend: {}".format(model_args.infer_backend))
         else:
