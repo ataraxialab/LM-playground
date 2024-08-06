@@ -8,7 +8,7 @@ import torch
 from transformers import GenerationConfig, TextIteratorStreamer
 
 from .base_engine import BaseEngine, Response
-from chat.llama_cpp_lm import Llama
+from chat.model.llama_cpp_lm import Llama
 from llama_cpp.llama_tokenizer import LlamaHFTokenizer
 
 
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from ..hparams import DataArguments, FinetuningArguments, GeneratingArguments, ModelArguments
 
 
-class llamaCppQwen(BaseEngine):
+class llamaCppEngine(BaseEngine):
     def __init__(self,
                  model_args: "ModelArguments" = None,
                  data_args: "DataArguments" = None,
@@ -32,9 +32,9 @@ class llamaCppQwen(BaseEngine):
         self.can_generate = True
         self.model_name = model_args.model_name_or_path
         self.generating_args = generating_args.to_dict()
-        self.generating_args["n_gpu_layers"] = -1
-        self.generating_args["chat_format"] = "qwen"
-        self.generating_args["temperature"] = 0.95
+        self.generating_args["n_gpu_layers"] = model_args.n_gpu_layers
+        self.generating_args["chat_format"] = model_args.chat_format
+        self.generating_args["temperature"] = model_args.temperature
         self.llama_tokenizer = LlamaHFTokenizer.from_pretrained(model_args.tokenizer_dir)
         self.runner = Llama(
             model_path=self.model_name,

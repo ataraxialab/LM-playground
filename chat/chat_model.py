@@ -6,9 +6,10 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, Generator, List, Op
 from .hparams import get_infer_args
 from .hf_engine import HuggingfaceEngine
 from .vllm_engine import VllmEngine
-from chat import run
-from chat.trt_llm_engine import trtLLMQwen
-from .llama_cpp_engine import llamaCppQwen
+
+from .llama_cpp_engine import llamaCppEngine
+from .trt_llm_engine import TrtLLMEngine
+
 if TYPE_CHECKING:
     from .base_engine import BaseEngine, Response
 
@@ -20,6 +21,7 @@ def _start_background_loop(loop: asyncio.AbstractEventLoop) -> None:
 
 class ChatModel:
     def __init__(self, args: Optional[Dict[str, Any]] = None) -> None:
+
         if args['trt_llm_llama'] == '':
             del args['trt_llm_llama']
             model_args, data_args, finetuning_args, generating_args = get_infer_args(args)
@@ -28,10 +30,13 @@ class ChatModel:
                 self.engine: "BaseEngine" = HuggingfaceEngine(model_args, data_args, finetuning_args, generating_args)
             elif model_args.infer_backend == "vllm":
                 self.engine: "BaseEngine" = VllmEngine(model_args, data_args, finetuning_args, generating_args)
+            elif model_args.infer_backend == "trt-llm":
+                self.engine: "BaseEngine" = TrtLLMEngine(model_args, data_args, finetuning_args, generating_args)
             elif model_args.infer_backend == "llama":
-                self.engine: "BaseEngine" = llamaCppQwen(model_args, data_args, finetuning_args, generating_args)
+                self.engine: "BaseEngine" = llamaCppEngine(model_args, data_args, finetuning_args, generating_args)
             else:
                 raise NotImplementedError("Unknown backend: {}".format(model_args.infer_backend))
+
         else:
             # 不用更新
             trt_llm_args = run.parse_arguments(args_copy=args)

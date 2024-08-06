@@ -1,15 +1,8 @@
 from tensorrt_llm.runtime import ModelRunnerCpp
 from .base_engine import BaseEngine
-import argparse
-import torch
-from chat.utils import (DEFAULT_HF_MODEL_DIRS, DEFAULT_PROMPT_TEMPLATES,
-                        add_common_args, load_tokenizer, read_decoder_start_token_id,
-                        read_model_name, supports_inflight_batching,
-                        throttle_generator)
-from tensorrt_llm.runtime import (
-    ModelConfig, SamplingConfig, GenerationSession
-)
-import ast
+
+from tensorrt_llm.builder import get_engine_version
+
 import csv
 import numpy as np
 from pathlib import Path
@@ -17,21 +10,37 @@ from pathlib import Path
 import tensorrt_llm
 import tensorrt_llm.profiler
 from tensorrt_llm.logger import logger
-from tensorrt_llm.runtime import PYTHON_BINDINGS, ModelRunner
+
+from tensorrt_llm.runtime import PYTHON_BINDINGS
+
 
 import asyncio
 import concurrent.futures
 import os
 from threading import Thread
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Dict, List, Optional, Sequence
 
 import torch
 from transformers import GenerationConfig, TextIteratorStreamer
-
-from .data import get_template_and_fix_tokenizer
-from .extras.misc import get_logits_processor
-from .model import load_model, load_tokenizer
+from .model import load_model, load_tokenizer, load_tokenizer_trt
 from .base_engine import BaseEngine, Response
+
+INTERNLM_META_INSTRUCTION = """You are an AI assistant whose name is InternLM (书生·浦语).
+- InternLM (书生·浦语) is a conversational language model that is developed by Shanghai AI Laboratory (上海人工智能实验室). It is designed to be helpful, honest, and harmless.
+- InternLM (书生·浦语) can understand and communicate fluently in the language chosen by the user such as English and 中文.
+"""
+
+DEFAULT_PROMPT_TEMPLATES = {
+    'InternLMForCausalLM':
+    "<|User|>:{input_text}<eoh>\n<|Bot|>:",
+    'InternLM2ForCausalLM':
+    "<|im_start|>system\n" + INTERNLM_META_INSTRUCTION +
+    "<|im_end|>\n<|im_start|>user\n{input_text}<|im_end|>\n<|im_start|>assistant\n",
+    'QWenForCausalLM':
+    "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{input_text}<|im_end|>\n<|im_start|>assistant\n",
+}
+
+
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel, PreTrainedTokenizer
@@ -41,246 +50,30 @@ if TYPE_CHECKING:
     from ..hparams import DataArguments, FinetuningArguments, GeneratingArguments, ModelArguments
 
 
-def add_common_args(parser):
-    # sampling arguments
-    parser.add_argument('--num_beams',
-                        type=int,
-                        help="Use beam search if num_beams > 1",
-                        default=1)
-    parser.add_argument('--temperature', type=float, default=1.0)
-    parser.add_argument('--top_k', type=int, default=1)
-    parser.add_argument('--top_p', type=float, default=0.0)
-    parser.add_argument('--length_penalty', type=float, default=1.0)
-    parser.add_argument('--repetition_penalty', type=float, default=1.0)
-    parser.add_argument('--presence_penalty', type=float, default=0.0)
-    parser.add_argument('--frequency_penalty', type=float, default=0.0)
-    parser.add_argument('--beam_search_diversity_rate', type=float, default=0.0)
-    parser.add_argument('--random_seed', type=int, default=0)
-    parser.add_argument('--early_stopping',
-                        type=int,
-                        help='Use early stopping if num_beams > 1'
-                             '1 for early-stopping, 0 for non-early-stopping'
-                             'other values for stopping by length',
-                        default=1)
-    parser.add_argument(
-        '--stop_words',
-        default=None,
-        type=str,
-        nargs="+",
-        action='append',
-        help=
-        'Set stop words for a batch. Successive invocations of --stop_words set stop words for other batches.'
-        '    E.g.: --stop_words " London" " chef" --stop_words "eventually became" "was not"',
-    )
-    parser.add_argument(
-        '--bad_words',
-        default=None,
-        type=str,
-        nargs="+",
-        action='append',
-        help=
-        'Set bad words for a batch. Successive invocations of --bad_words set bad words for other batches.'
-        '    E.g.: --bad_words " London" " chef" --bad_words "eventually became" "was not"',
-    )
-    parser.add_argument('--no_repeat_ngram_size', type=int, default=None)
+def read_model_name(engine_dir: str):
+    engine_version = get_engine_version(engine_dir)
 
-    # common runtime arguments
-    parser.add_argument('--sink_token_length',
-                        type=int,
-                        default=None,
-                        help='The sink token length.')
-    parser.add_argument(
-        '--max_attention_window_size',
-        type=int,
-        default=None,
-        help=
-        'The attention window size that controls the sliding window attention / cyclic kv cache behavior'
-    )
-    parser.add_argument('--log_level', type=str, default='info')
-    parser.add_argument(
-        '--no_prompt_template',
-        dest='use_prompt_template',
-        default=True,
-        action='store_false',
-        help=
-        "Whether or not to use default prompt template to wrap the input text.")
-    parser.add_argument('--use_py_session',
-                        default=False,
-                        action='store_true',
-                        help="Whether or not to use Python runtime session")
-    parser.add_argument('--debug_mode',
-                        default=False,
-                        action='store_true',
-                        help="Whether or not to turn on the debug mode")
-    parser.add_argument('--streaming', default=False, action='store_true')
-    parser.add_argument('--streaming_interval',
-                        type=int,
-                        help="How often to return tokens when streaming.",
-                        default=5)
-    parser.add_argument(
-        '--prompt_table_path',
-        type=str,
-        help="Path to .npy file, exported by nemo_prompt_convert.py")
-    parser.add_argument(
-        '--prompt_tasks',
-        help="Comma-separated list of tasks for prompt tuning, e.g., 0,3,1,0")
-    parser.add_argument('--lora_dir',
-                        type=str,
-                        default=None,
-                        nargs="+",
-                        help="The directory of LoRA weights")
-    parser.add_argument('--lora_ckpt_source',
-                        type=str,
-                        default="hf",
-                        choices=["hf", "nemo"],
-                        help="The source of lora checkpoint.")
-    parser.add_argument(
-        '--lora_task_uids',
-        type=str,
-        default=None,
-        nargs="+",
-        help="The list of LoRA task uids; use -1 to disable the LoRA module")
-    parser.add_argument(
-        '--num_prepend_vtokens',
-        nargs="+",
-        type=int,
-        help="Number of (default) virtual tokens to prepend to each sentence."
-             " For example, '--num_prepend_vtokens=10' will prepend the tokens"
-             " [vocab_size, vocab_size + 1, ..., vocab_size + 9] to the sentence.")
-    parser.add_argument(
-        '--medusa_choices',
-        type=str,
-        default=None,
-        help="Medusa choice to use, if not none, will use Medusa decoding."
-             "   E.g.: [[0, 0, 0, 0], [0, 1, 0], [1, 0], [1, 1]] for 9 medusa tokens."
-    )
+    with open(Path(engine_dir) / "config.json", 'r') as f:
+        import json
+        config = json.load(f)
 
-    # model arguments
-    # parser.add_argument('--engine_dir', type=str, default='engine_outputs')
-    parser.add_argument(
-        '--tokenizer_type',
-        help=
-        'Specify that argument when providing a .model file as the tokenizer_dir. '
-        'It allows AutoTokenizer to instantiate the correct tokenizer type.')
-    parser.add_argument('--vocab_file',
-                        help="Used for sentencepiece tokenizers")
-    parser.add_argument('--no_add_special_tokens',
-                        dest='add_special_tokens',
-                        default=True,
-                        action='store_false',
-                        help="Whether or not to add special tokens")
-    parser.add_argument('--hf_model_dir', '--model_dir', type=str, default=None)
-    # parser.add_argument(
-    #     '--tokenizer_dir',
-    #     default=None,
-    #     help='tokenizer path; defaults to hf_model_dir if left unspecified')
+    if engine_version is None:
+        return config['builder_config']['name'], None
 
-    # memory argument
-    parser.add_argument(
-        '--gpu_weights_percent',
-        default=1,
-        type=float,
-        help=
-        'Specify the percentage of weights that reside on GPU instead of CPU and streaming load during runtime.',
-    )
-    parser.add_argument(
-        '--max_tokens_in_paged_kv_cache',
-        default=None,
-        type=int,
-        help=
-        'Specify the maximum number of tokens in a kv cache page (only available with cpp session).',
-    )
-    parser.add_argument(
-        '--kv_cache_enable_block_reuse',
-        action='store_true',
-        help=
-        'Enables block reuse in kv cache (only available with cpp session).',
-    )
-    parser.add_argument(
-        '--kv_cache_free_gpu_memory_fraction',
-        default=0.9,
-        type=float,
-        help='Specify the free gpu memory fraction.',
-    )
-    parser.add_argument(
-        '--enable_chunked_context',
-        action='store_true',
-        help='Enables chunked context (only available with cpp session).',
-    )
+    model_arch = config['pretrained_config']['architecture']
+    model_version = None
+    if model_arch == 'ChatGLMForCausalLM':
+        model_version = config['pretrained_config']['chatglm_version']
+    if model_arch == 'QWenForCausalLM':
+        model_version = config['pretrained_config']['qwen_type']
+    return model_arch, model_version
 
-    # hf model argument (if use hf model)
-    parser.add_argument(
-        '--hf_data_type',
-        '--data_type',
-        type=str,
-        choices=['fp32', 'fp16', 'bf16', 'float32', 'float16', 'bfloat16'],
-        default='fp16',
-        help="The data type for hf model.")
-    parser.add_argument(
-        '--hf_device_map_auto',
-        action='store_true',
-        help="Use device map 'auto' to load a pretrained HF model. This may "
-             "help to test a large model that cannot fit into a singlue GPU.")
-
-    parser.add_argument(
-        "--return_all_generated_tokens",
-        default=False,
-        action="store_true",
-        help="if false, return only generated tokens at each streaming step."
-             "If true, return the full beams/outputs at each step"
-             "Overwritten to True if num_beams>1 and streaming"
-             "(only available with cpp session). "
-             "WARNING: using this option may increase network usage significantly (quadratically w.r.t output length)."
-    )
-
-    return parser
-
-
-def parse_arguments(args_copy, args=None):
-    # see `add_common_args` for extended list of arguments
-    parser = argparse.ArgumentParser()
-    for key, default_value in args_copy.items():
-        parser.add_argument(f'--{key}', type=str, default=default_value,
-                            help=f'An optional parameter with default value {default_value}.')
-    parser.add_argument('--max_input_length', type=int, default=923)
-    parser.add_argument(
-        '--input_file',
-        type=str,
-        help=
-        'CSV or Numpy file containing tokenized input. Alternative to text input.',
-        default=None)
-    parser.add_argument('--output_csv',
-                        type=str,
-                        help='CSV file where the tokenized output is stored.',
-                        default=None)
-    parser.add_argument('--output_npy',
-                        type=str,
-                        help='Numpy file where the tokenized output is stored.',
-                        default=None)
-    parser.add_argument(
-        '--output_logits_npy',
-        type=str,
-        help=
-        'Numpy file where the generation logits are stored. Use only when num_beams==1',
-        default=None)
-    parser.add_argument('--output_log_probs_npy',
-                        type=str,
-                        help='Numpy file where the log_probs are stored',
-                        default=None)
-    parser.add_argument('--output_cum_log_probs_npy',
-                        type=str,
-                        help='Numpy file where the cum_log_probs are stored',
-                        default=None)
-    parser.add_argument(
-        '--run_profiling',
-        default=False,
-        action='store_true',
-        help="Run several 10 iterations to profile the inference latencies.")
-
-    parser = add_common_args(parser)
-
-    return parser.parse_args(args=args)
-
+def supports_inflight_batching(engine_dir):
+    from tensorrt_llm.bindings import GptJsonConfig
+    config_path = Path(engine_dir) / "config.json"
+    json_config = GptJsonConfig.parse_file(config_path)
+    model_config = json_config.model_config
+    return model_config.supports_inflight_batching
 
 def parse_input(tokenizer,
                 input_text=None,
@@ -348,7 +141,6 @@ def parse_input(tokenizer,
     ]
     return batch_input_ids
 
-
 def print_output(tokenizer,
                  output_ids,
                  input_lengths,
@@ -362,8 +154,7 @@ def print_output(tokenizer,
                  output_logits_npy=None,
                  output_cum_log_probs_npy=None,
                  output_log_probs_npy=None, streamer = None):
-    batch_size, num_beams, _ = output_ids.size()
-    if output_csv is None and output_npy is None:
+        batch_size, num_beams, _ = output_ids.size()
         for batch_idx in range(batch_size):
             inputs = output_ids[batch_idx][0][:input_lengths[batch_idx]].tolist(
             )
@@ -387,240 +178,167 @@ def print_output(tokenizer,
                 # if streamer is not None:
                 # for tensor in outputs1.tolist():
                     # tensor = torch.tensor(tensor)
+                if streamer is not None:
+                    for item in outputs1:
+                        streamer.put(torch.tensor([item]))
 
-                for item in outputs1:
-                    streamer.put(torch.tensor([item]))
-
-
-def get_trt_llm_base_args(args):
-    runtime_rank = tensorrt_llm.mpi_rank()
-    logger.set_level(args.log_level)
-
-    # different handling if encoder-decoder models
-    is_enc_dec = {
-                     name
-                     for name in os.listdir(args.engine_dir)
-                     if os.path.isdir(os.path.join(args.engine_dir, name))
-                 } == {'encoder', 'decoder'}
-    if is_enc_dec:
-        logger.warning(
-            "This path is an encoder-decoder model. Using different handling.")
-        assert not args.use_py_session, "Encoder-decoder models don't have a unified python runtime, please use its own examples/enc_dec/run.py instead."
-
-    model_name, model_version = read_model_name(
-        args.engine_dir) if not is_enc_dec else ("", "")
-    if args.tokenizer_dir is None and model_name in DEFAULT_HF_MODEL_DIRS:
-        logger.warning(
-            "tokenizer_dir is not specified. Try to infer from model_name, but this may be incorrect."
-        )
-        args.tokenizer_dir = DEFAULT_HF_MODEL_DIRS[model_name]
-
-    tokenizer, pad_id, end_id = load_tokenizer(
-        tokenizer_dir=args.tokenizer_dir,
-        vocab_file=args.vocab_file,
-        model_name=model_name,
-        model_version=model_version,
-        tokenizer_type=args.tokenizer_type,
-    )
-
-    stop_words_list = None
-    if args.stop_words:
-        stop_words_list = tensorrt_llm.runtime.decode_words_list(
-            args.stop_words, tokenizer)
-
-    bad_words_list = None
-    if args.bad_words:
-        bad_words_list = tensorrt_llm.runtime.decode_words_list(
-            args.bad_words, tokenizer)
-
-    prompt_template = None
-    if args.use_prompt_template and model_name in DEFAULT_PROMPT_TEMPLATES:
-        prompt_template = DEFAULT_PROMPT_TEMPLATES[model_name]
-
-    return args, is_enc_dec, runtime_rank, tokenizer, end_id, pad_id, stop_words_list, bad_words_list, model_name, model_version, prompt_template
-
-
-class trtLLMQwen(BaseEngine):
-    def __init__(self, args_copy, args, trt_llm_args, is_enc_dec, runtime_rank, tokenizer, end_id, pad_id,
-                 stop_words_list, bad_words_list, model_name, model_version, prompt_template,
+class TrtLLMEngine(BaseEngine):
+    # def __init__(self, args_copy, args, trt_llm_args, is_enc_dec, runtime_rank, tokenizer, end_id, pad_id,
+    #              stop_words_list, bad_words_list, model_name, model_version, prompt_template,
+    #              model_args: "ModelArguments" = None,
+    #              data_args: "DataArguments" = None,
+    #              finetuning_args: "FinetuningArguments" = None,
+    #              generating_args: "GeneratingArguments" = None
+    #              ):
+    def __init__(self,
                  model_args: "ModelArguments" = None,
                  data_args: "DataArguments" = None,
                  finetuning_args: "FinetuningArguments" = None,
                  generating_args: "GeneratingArguments" = None
                  ):
+        
+        self.is_enc_dec = {
+            name
+            for name in os.listdir(model_args.model_name_or_path)
+            if os.path.isdir(os.path.join(model_args.model_name_or_path))
+        } == {'encoder', 'decoder'}
+
+        model_name, model_version = read_model_name(model_args.model_name_or_path
+                                                    ) if not self.is_enc_dec else ("", "")
+
+        if model_args.tokenizer_dir is None :
+            logger.ValueError(
+                "tokenizer_dir is not specified. Try to infer from model_name, but this may be incorrect."
+            )
+
+        self.tokenizer, self.pad_id, self.end_id = load_tokenizer_trt(
+            tokenizer_dir=model_args.tokenizer_dir,
+            vocab_file=model_args.vocab_file,
+            model_name=model_name,
+            model_version=model_version,
+            tokenizer_type=model_args.tokenizer_type,
+        )
+        generating_args.pad_id = self.pad_id
+        generating_args.end_id = self.end_id
+
+        self.debug_mode = generating_args.trt_debug_mode
+        self.return_all_generated_tokens = generating_args.trt_return_all_generated_tokens
+
+        self.stop_words_list = None
+        generating_args.stop_words_list = self.stop_words_list
+        # if args.stop_words:
+        #     stop_words_list = tensorrt_llm.runtime.decode_words_list(
+        #         args.stop_words, tokenizer)
+
+        self.bad_words_list = None
+        # if args.bad_words:
+        #     bad_words_list = tensorrt_llm.runtime.decode_words_list(
+        #         args.bad_words, tokenizer)
+        generating_args.bad_words_list = self.bad_words_list
+
+        self.prompt_template = None
+        if  model_name in DEFAULT_PROMPT_TEMPLATES:
+            self.prompt_template = DEFAULT_PROMPT_TEMPLATES[model_name]
+
+        config  = {}
+        engine_dir = Path(model_args.model_name_or_path)
+        config_path = os.path.join(engine_dir, "config.json")
+        with open(config_path, 'r') as f:
+            import json
+            config = json.load(f)
+
+
 
         self.runner_kwargs = {
-            'engine_dir': args_copy.engine_dir,
+            'engine_dir': model_args.model_name_or_path,
             'lora_dir': None,
             'rank': 0,
             'debug_mode': False,
             'lora_ckpt_source': 'hf',
             'gpu_weights_percent': 1,
             'is_enc_dec': False,
-            'max_batch_size': 1,
-            'max_input_len': 1,
-            'max_output_len': 1,
-            'max_beam_width': 1,
-            'max_attention_window_size': None,
-            'sink_token_length': None,
-            'max_tokens_in_paged_kv_cache': None,
-            'kv_cache_enable_block_reuse': False,
-            'kv_cache_free_gpu_memory_fraction': 0.9,
-            'enable_chunked_context': False
+            'max_batch_size': config['build_config']["max_batch_size"],
+            'max_input_len': config['build_config']["max_input_len"],
+            'max_output_len': generating_args.max_length,
+            'max_beam_width': config['build_config']["max_beam_width"],
+            'max_attention_window_size': generating_args.trt_max_attention_window_size,
+            'sink_token_length': generating_args.trt_sink_token_length,
+            'max_tokens_in_paged_kv_cache': generating_args.trt_max_tokens_in_paged_kv_cache,
+            'kv_cache_enable_block_reuse': generating_args.trt_kv_cache_enable_block_reuse,
+            'kv_cache_free_gpu_memory_fraction': generating_args.trt_kv_cache_free_gpu_memory_fraction,
+            'enable_chunked_context': generating_args.trt_enable_chunked_context,
         }
-        self.args = args
-        self.is_enc_dec = is_enc_dec
-        self.runtime_rank = runtime_rank
-        self.tokenizer = tokenizer
-        self.end_id = end_id
-        self.pad_id = pad_id
-        self.stop_words_list = stop_words_list
-        self.bad_words_list = bad_words_list
+        
+        #self.generating_args = generating_args
+        self.runtime_rank = tensorrt_llm.mpi_rank()
+
         self.model_name = model_name
         self.model_version = model_version
-        self.prompt_template = prompt_template
-
         self.can_generate = True
         self.tokenizer.padding_side = "left"
-        self.template = get_template_and_fix_tokenizer(self.tokenizer, 'qwen')
-
+        #self.template = get_template_and_fix_tokenizer(self.tokenizer, 'qwen')
         self.runner = ModelRunnerCpp.from_dir(**self.runner_kwargs)
 
-
-    @staticmethod
-    def run_update_trt_llm_args(self, args, tokenizer, prompt_template, model_name, model_version, is_enc_dec,
-                                runtime_rank,
-                                stop_words_list, pad_id, end_id, bad_words_list,
-                                messages: Sequence[Dict[str, str]], template: "Template", system: Optional[str] = None,
-                                tools: Optional[str] = None):
-        paired_messages = messages + [{"role": "assistant", "content": ""}]
-        prompt_ids, _ = template.encode_oneturn(
-            tokenizer=tokenizer, messages=paired_messages, system=system, tools=tools
-        )
-
-        batch_input_ids = torch.tensor([prompt_ids], dtype=torch.int32)
-
-        encoder_input_ids = None
-        decoder_input_ids = None
-        if is_enc_dec:
-            encoder_input_ids = batch_input_ids
-            decoder_start_token_id = read_decoder_start_token_id(
-                os.path.join(args.engine_dir, "decoder"))
-            decoder_input_ids = [
-                torch.tensor([decoder_start_token_id], dtype=torch.int32)
-                for _ in batch_input_ids
-            ]
-
-        input_lengths = [x.size(0) for x in decoder_input_ids
-                         ] if is_enc_dec else [x.size(0) for x in batch_input_ids]
-        encoder_input_lengths = [x.size(0)
-                                 for x in encoder_input_ids] if is_enc_dec else None
-
-        if not supports_inflight_batching(
-                os.path.join(args.engine_dir, "decoder") if is_enc_dec else args.
-                        engine_dir):
+        ### init the running para
+        self.trt_return_all_generated_tokens = generating_args.trt_return_all_generated_tokens
+        self.support_inflight_batching = supports_inflight_batching(
+            os.path.join(model_args.model_name_or_path, "decoder") if self.is_enc_dec else model_args.
+                model_name_or_path
+                )
+        
+        if not self.support_inflight_batching:
             logger.warning(
                 "The given engine does not support in-flight batching, fallback to python session"
             )
-            args.use_py_session = True
+            self.use_py_session = True
 
-        if not PYTHON_BINDINGS and not args.use_py_session:
+        if not PYTHON_BINDINGS and not self.use_py_session:
             logger.warning(
                 "Python bindings of C++ session is unavailable, fallback to Python session."
             )
-            args.use_py_session = True
-        if args.debug_mode and not args.use_py_session:
+            self.use_py_session = True
+        if self.debug_mode and not self.use_py_session:
             logger.warning(
                 "Debug mode is not supported in C++ session for now, fallback to Python session."
             )
-            args.use_py_session = True
-        if args.return_all_generated_tokens and args.use_py_session:
+            self.use_py_session = True
+        
+        if self.trt_return_all_generated_tokens and self.use_py_session:
             raise ValueError(
                 "Returning all the generated tokens at each step is not supported in the Python session, use C++ session instead."
             )
-        if (not args.return_all_generated_tokens) and args.streaming and (
-                args.num_beams > 1):
+        if (not self.return_all_generated_tokens) and generating_args.trt_streaming and (
+                generating_args.trt_num_beams > 1):
             logger.warning(
                 "Setting return_all_generated_tokens to True since streaming AND beam search are done simultaneously. "
                 "Returning the full beams at each streaming step is needed because beam search + streaming can change previous outputs. "
                 "WARNING: using this option may increase network usage significantly (quadratically w.r.t output length)."
             )
-            args.return_all_generated_tokens = True
-        # runner_cls = ModelRunner if args.use_py_session else ModelRunnerCpp
-        runner_kwargs = dict(
-            engine_dir=args.engine_dir,
-            lora_dir=args.lora_dir,
-            rank=runtime_rank,
-            debug_mode=args.debug_mode,
-            lora_ckpt_source=args.lora_ckpt_source,
-            gpu_weights_percent=args.gpu_weights_percent,
-        )
-        if not args.use_py_session:
-            runner_kwargs.update(is_enc_dec=is_enc_dec)
-        if args.medusa_choices is not None:
-            args.medusa_choices = ast.literal_eval(args.medusa_choices)
-            assert args.temperature == 1.0, "Medusa should use temperature == 1.0"
-            assert args.num_beams == 1, "Medusa should use num_beams == 1"
-            runner_kwargs.update(medusa_choices=args.medusa_choices)
+            self.return_all_generated_tokens = True
 
-        return args, is_enc_dec, runtime_rank, tokenizer, batch_input_ids, encoder_input_ids, decoder_input_ids, input_lengths, \
-            end_id, pad_id, stop_words_list, bad_words_list
+        
+        
+        self.generating_args = generating_args
+
 
     @staticmethod
     def run_trt_llm(**kwargs):
         runner_trt_llm = kwargs.get('runner')
-        args = kwargs.get('args')
-        is_enc_dec = kwargs.get('is_enc_dec')
-        runtime_rank = kwargs.get('runtime_rank')
+        #args = kwargs.get('args')
         tokenizer = kwargs.get('tokenizer')
         batch_input_ids = kwargs.get('batch_input_ids')
-        encoder_input_ids = kwargs.get('encoder_input_ids')
-        decoder_input_ids = kwargs.get('decoder_input_ids')
+
         input_lengths = kwargs.get('input_lengths')
-        end_id = kwargs.get('end_id')
-        pad_id = kwargs.get('pad_id')
-        stop_words_list = kwargs.get('stop_words_list')
-        bad_words_list = kwargs.get('bad_words_list')
-        streamer =  kwargs.get('streamer')
+
+        streamer =  kwargs.get('streamer') if 'streamer' in kwargs else None
 
         # 把batch input ids去掉
         if streamer is not None:
-            streamer.put(batch_input_ids.cpu())
+            streamer.put(batch_input_ids[0].cpu())
 
         # 相差结果大不大，
         with torch.no_grad():
-            outputs = runner_trt_llm.generate(
-                batch_input_ids=decoder_input_ids
-                if is_enc_dec else batch_input_ids,
-                encoder_input_ids=encoder_input_ids if is_enc_dec else None,
-                max_new_tokens=args.max_output_len,
-                max_attention_window_size=args.max_attention_window_size,
-                sink_token_length=args.sink_token_length,
-                end_id=end_id,
-                pad_id=pad_id,
-                temperature=args.temperature,
-                top_k=args.top_k,
-                top_p=args.top_p,
-                num_beams=args.num_beams,
-                length_penalty=args.length_penalty,
-                early_stopping=args.early_stopping,
-                repetition_penalty=args.repetition_penalty,
-                presence_penalty=args.presence_penalty,
-                frequency_penalty=args.frequency_penalty,
-                stop_words_list=stop_words_list,
-                bad_words_list=bad_words_list,
-                output_cum_log_probs=(args.output_cum_log_probs_npy != None),
-                output_log_probs=(args.output_log_probs_npy != None),
-                random_seed=args.random_seed,
-                lora_uids=args.lora_task_uids,
-                prompt_table=args.prompt_table_path,
-                prompt_tasks=args.prompt_tasks,
-                streaming=args.streaming,
-                output_sequence_lengths=True,
-                no_repeat_ngram_size=args.no_repeat_ngram_size,
-                return_dict=True,
-                medusa_choices=args.medusa_choices,
-                return_all_generated_tokens=args.return_all_generated_tokens)
+            outputs = runner_trt_llm.generate(**kwargs)
             torch.cuda.synchronize()
 
         # if runtime_rank == 0:这里为什么一开始就输入一次input-ids
@@ -637,72 +355,144 @@ class trtLLMQwen(BaseEngine):
             context_logits = outputs['context_logits']
         if runner_trt_llm.gather_generation_logits:
             generation_logits = outputs['generation_logits']
-        if args.output_cum_log_probs_npy != None:
+        if kwargs.get("output_cum_log_probs_npy") != None:
             cum_log_probs = outputs['cum_log_probs']
-        if args.output_log_probs_npy != None:
+        if kwargs.get("output_log_probs_npy") != None:
             log_probs = outputs['log_probs']
 
         print_output(tokenizer,
                      output_ids,
                      input_lengths,
                      sequence_lengths,
-                     output_csv=args.output_csv,
-                     output_npy=args.output_npy,
+                     output_csv=kwargs.get("output_csv") if "output_csv" in kwargs else None,
+                     output_npy=kwargs.get("output_npy") if "output_npy" in kwargs else None,
                      context_logits=context_logits,
                      generation_logits=generation_logits,
-                     output_logits_npy=args.output_logits_npy,
+                     output_logits_npy=kwargs.get("output_logits_npy") if "output_logits_npy" in kwargs else None,
                      cum_log_probs=cum_log_probs,
                      log_probs=log_probs,
-                     output_cum_log_probs_npy=args.output_cum_log_probs_npy,
-                     output_log_probs_npy=args.output_log_probs_npy, streamer = streamer)
+                     output_cum_log_probs_npy=kwargs.get("output_cum_log_probs_npy") if "output_cum_log_probs_npy" in kwargs else None,
+                     output_log_probs_npy=kwargs.get("output_log_probs_npy") if "output_log_probs_npy" in kwargs else None,
+                     streamer = streamer)
 
         if streamer is not None:
             streamer.end()
 
 
     @staticmethod
+    def _process_args(tokenizer, 
+                      prompt_template, 
+                      model_name, 
+                      model_version, 
+                      pad_id, 
+                      genaration_kwargs,
+                      num_prepend_vtokens=[],
+                      max_input_length:int=923,
+                      add_special_tokens:bool = True,
+                      messages:Sequence[Dict[str, str]] = None):
+        
+        input_text = ""
+        for mess in messages:
+            input_text += mess['content'].strip()
+
+
+        batch_input_ids = parse_input(tokenizer=tokenizer,
+                                    input_text=[input_text],
+                                    prompt_template=prompt_template,
+                                    input_file=None,
+                                    add_special_tokens=add_special_tokens,
+                                    max_input_length=max_input_length,
+                                    pad_id=pad_id,
+                                    num_prepend_vtokens=num_prepend_vtokens,
+                                    model_name=model_name,
+                                    model_version=model_version)   
+
+
+        input_lengths =  [x.size(0) for x in batch_input_ids]
+
+        gen_kwargs ={
+            "tokenizer":tokenizer,
+            'batch_input_ids': batch_input_ids,
+            "input_lengths": input_lengths,
+            "encoder_input_ids": None,
+            "max_new_tokens": max_input_length,
+            "max_attention_window_size": genaration_kwargs.trt_max_attention_window_size,
+            "sink_token_length": genaration_kwargs.trt_sink_token_length,
+            "end_id": genaration_kwargs.end_id,
+            "pad_id": genaration_kwargs.pad_id,
+            "temperature": genaration_kwargs.temperature,
+            "top_k": genaration_kwargs.top_k,
+            "top_p": genaration_kwargs.top_p,
+            "num_beams": genaration_kwargs.trt_num_beams,
+            "length_penalty": genaration_kwargs.length_penalty,
+            "early_stopping": genaration_kwargs.early_stopping,
+            "repetition_penalty": genaration_kwargs.repetition_penalty,
+            "presence_penalty": genaration_kwargs.trt_presence_penalty,
+            "frequency_penalty": genaration_kwargs.trt_frequency_penalty,
+            "stop_words_list": genaration_kwargs.stop_words_list,
+            "bad_words_list": genaration_kwargs.bad_words_list,
+            "output_cum_log_probs": genaration_kwargs.trt_output_cum_log_probs_npy!= None,
+            "output_log_probs": genaration_kwargs.trt_output_log_probs_npy != None,
+            "random_seed": genaration_kwargs.random_seed,
+            "lora_uids": genaration_kwargs.trt_lora_task_uids,
+            "prompt_table": genaration_kwargs.trt_prompt_table,
+            "prompt_tasks": genaration_kwargs.trt_prompt_tasks,
+            "streaming": genaration_kwargs.trt_streaming,
+            "no_repeat_ngram_size":genaration_kwargs.trt_no_repeat_ngram_size,
+            "medusa_choices":genaration_kwargs.trt_medusa_choices,
+            "return_all_generated_tokens":genaration_kwargs.trt_return_all_generated_tokens,
+            "output_sequence_lengths": True,
+            "return_dict":True,
+        }
+
+        return gen_kwargs
+    
+
+        # runner_cls = ModelRunner if args.use_py_session else ModelRunnerCpp
+
+        # if not args.use_py_session:
+        #     runner_kwargs.update(is_enc_dec=is_enc_dec)
+        # if args.medusa_choices is not None:
+        #     args.medusa_choices = ast.literal_eval(args.medusa_choices)
+        #     assert args.temperature == 1.0, "Medusa should use temperature == 1.0"
+        #     assert args.num_beams == 1, "Medusa should use num_beams == 1"
+        #     runner_kwargs.update(medusa_choices=args.medusa_choices)
+
+        # return args, is_enc_dec, runtime_rank, tokenizer, batch_input_ids, encoder_input_ids, decoder_input_ids, input_lengths, \
+        #     end_id, pad_id, stop_words_list, bad_words_list
+
+
+    @staticmethod
     @torch.inference_mode()
     def _stream_chat(
-            self,
-            args, is_enc_dec, runtime_rank, tokenizer, end_id, pad_id,
-            stop_words_list, bad_words_list, model_name, model_version, prompt_template,
-            template,
+            runner,
+            tokenizer,
+            prompt_template,
+            model_name, 
+            model_version, 
+            pad_id, 
             messages: Sequence[Dict[str, str]],
             generating_args: Dict[str, Any],
             system: Optional[str] = None,
             tools: Optional[str] = None,
             input_kwargs: Optional[Dict[str, Any]] = {},
     ) -> Callable[[], str]:
-        args, is_enc_dec, runtime_rank, tokenizer, batch_input_ids, encoder_input_ids, decoder_input_ids, input_lengths, end_id, pad_id, stop_words_list, bad_words_list \
-            = trtLLMQwen.run_update_trt_llm_args(self, args, tokenizer,
-                                                 prompt_template,
-                                                 model_name,
-                                                 model_version,
-                                                 is_enc_dec,
-                                                 runtime_rank,
-                                                 stop_words_list,
-                                                 pad_id, end_id,
-                                                 bad_words_list, messages, template)
+        generating_kwargs = TrtLLMEngine._process_args(tokenizer,
+                                                    prompt_template,
+                                                    model_name,
+                                                    model_version,
+                                                    pad_id,
+                                                    generating_args,
+                                                    messages = messages)
 
 
         gen_kwargs = {
-            "runner": self.runner,
-            "args": args,
-            "is_enc_dec": is_enc_dec,
-            "runtime_rank": runtime_rank,
-            "tokenizer": tokenizer,
-            "batch_input_ids": batch_input_ids,
-            "encoder_input_ids": encoder_input_ids,
-            "decoder_input_ids": decoder_input_ids,
-            "input_lengths": input_lengths,
-            "end_id": 151645,
-            "pad_id": 151645,
-            "stop_words_list": stop_words_list,
-            "bad_words_list": bad_words_list,
+            "runner": runner,
+            **generating_kwargs,
         }
         streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
         gen_kwargs["streamer"] = streamer
-        thread = Thread(target=self.run_trt_llm, kwargs=gen_kwargs, daemon=True)
+        thread = Thread(target=TrtLLMEngine.run_trt_llm, kwargs=gen_kwargs, daemon=True)
         thread.start()
 
         def stream():
@@ -725,15 +515,14 @@ class trtLLMQwen(BaseEngine):
 
         loop = asyncio.get_running_loop()
         input_args = (
-            self,
-            self.args, self.is_enc_dec, self.runtime_rank,
-            self.tokenizer, self.end_id, self.pad_id, self.stop_words_list,
-            self.bad_words_list,
+            self.runner,
+            self.tokenizer,
+            self.prompt_template,
             self.model_name,
             self.model_version,
-            self.prompt_template,
-            self.template,
+            self.pad_id,
             messages,
+            self.generating_args,
             system,
             tools,
             input_kwargs,
@@ -834,7 +623,7 @@ class trtLLMQwen(BaseEngine):
             tools: Optional[str] = None,
             input_kwargs: Optional[Dict[str, Any]] = {},
     ) -> List["Response"]:
-        gen_kwargs, prompt_length = trtLLMQwen._process_args(
+        gen_kwargs, prompt_length = TrtLLMEngine._process_args(
             model, tokenizer, template, generating_args, messages, system, tools, input_kwargs
         )
         generate_output = model.generate(**gen_kwargs)

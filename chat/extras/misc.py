@@ -3,7 +3,7 @@ import os
 from typing import TYPE_CHECKING, Dict, Tuple
 
 import torch
-from peft import PeftModel
+
 from transformers import InfNanRemoveLogitsProcessor, LogitsProcessorList, PreTrainedModel
 from transformers.utils import (
     SAFE_WEIGHTS_NAME,
@@ -109,6 +109,7 @@ def fix_valuehead_checkpoint(
 
     We assume `stage3_gather_16bit_weights_on_model_save=true`.
     """
+    from peft import PeftModel
     if not isinstance(model.pretrained_model, (PreTrainedModel, PeftModel)):
         return
 
