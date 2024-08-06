@@ -27,17 +27,17 @@ class llamaCppQwen(BaseEngine):
                  model_args: "ModelArguments" = None,
                  data_args: "DataArguments" = None,
                  finetuning_args: "FinetuningArguments" = None,
-                 generating_args: "GeneratingArguments" = None,
-                 model_name=None):
+                 generating_args: "GeneratingArguments" = None
+                 ):
         self.can_generate = True
+        self.model_name = model_args.model_name_or_path
         self.generating_args = generating_args.to_dict()
         self.generating_args["n_gpu_layers"] = -1
         self.generating_args["chat_format"] = "qwen"
         self.generating_args["temperature"] = 0.95
-        self.llama_tokenizer = LlamaHFTokenizer.from_pretrained("/workspace/mnt/storage/xiangxin/llm_storge/qwen1.5-7b-lora/examples/qwen/tmp/Qwen1.5-7B")
-
+        self.llama_tokenizer = LlamaHFTokenizer.from_pretrained(model_args.tokenizer_dir)
         self.runner = Llama(
-            model_path=model_name,
+            model_path=self.model_name,
             n_gpu_layers=self.generating_args["n_gpu_layers"],
             chat_format=self.generating_args["chat_format"],
             tokenizer=self.llama_tokenizer

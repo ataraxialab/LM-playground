@@ -29,8 +29,7 @@ class ChatModel:
             elif model_args.infer_backend == "vllm":
                 self.engine: "BaseEngine" = VllmEngine(model_args, data_args, finetuning_args, generating_args)
             elif model_args.infer_backend == "llama":
-                model_name = "/workspace/mnt/storage/xiangxin/trt-llama/llama.cpp/ggml-qwen-chat-f16.gguf"
-                self.engine: "BaseEngine" = llamaCppQwen(model_args, data_args, finetuning_args, generating_args, model_name = model_name)
+                self.engine: "BaseEngine" = llamaCppQwen(model_args, data_args, finetuning_args, generating_args)
             else:
                 raise NotImplementedError("Unknown backend: {}".format(model_args.infer_backend))
         else:
