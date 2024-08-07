@@ -11,9 +11,6 @@ from .base_engine import BaseEngine, Response
 from chat.model.llama_cpp_lm import Llama
 from llama_cpp.llama_tokenizer import LlamaHFTokenizer
 
-
-
-
 if TYPE_CHECKING:
     from transformers import PreTrainedModel, PreTrainedTokenizer
     from trl import PreTrainedModelWrapper
@@ -32,9 +29,9 @@ class llamaCppEngine(BaseEngine):
         self.can_generate = True
         self.model_name = model_args.model_name_or_path
         self.generating_args = generating_args.to_dict()
-        self.generating_args["n_gpu_layers"] = model_args.n_gpu_layers
-        self.generating_args["chat_format"] = model_args.chat_format
-        self.generating_args["temperature"] = model_args.temperature
+        self.generating_args["n_gpu_layers"] = -1
+        self.generating_args["chat_format"] = data_args.template
+        self.generating_args["max_tokens"] = 1024
         self.llama_tokenizer = LlamaHFTokenizer.from_pretrained(model_args.tokenizer_dir)
         self.runner = Llama(
             model_path=self.model_name,
@@ -54,10 +51,7 @@ class llamaCppEngine(BaseEngine):
         top_k = kwargs.get('top_k')
         temperature = kwargs.get('temperature')
         streamer = kwargs.get('streamer')
-
-        # 把batch input ids去掉
-        # if streamer is not None:
-        #     streamer.put(batch_input_ids.cpu())
+        max_tokens = kwargs.get('max_tokens')
 
         # input_ids在create_chat_completion转换,tokenizer也在runner里面了
         runner.create_chat_completion(
@@ -65,19 +59,20 @@ class llamaCppEngine(BaseEngine):
             top_p=top_p,
             top_k=top_k,
             temperature=temperature,
-            max_tokens=1024,
+            max_tokens=max_tokens,
             streamer=streamer
         )
 
         # print(x["choices"][0]["message"]["content"])
 
     @staticmethod
-    def _process_args(messages, top_p, top_k, temperature):
+    def _process_args(messages, top_p, top_k, temperature, max_tokens):
         gen_kwargs = {
             "messages": messages,
             "top_p": top_p,
             "top_k": top_k,
             "temperature": temperature,
+            "max_tokens": max_tokens
         }
 
         return gen_kwargs
@@ -95,8 +90,9 @@ class llamaCppEngine(BaseEngine):
             input_kwargs: Optional[Dict[str, Any]] = {},
     ) -> Callable[[], str]:
 
-        generating_kwargs = llamaCppQwen._process_args(
-            messages, generating_args["top_p"], generating_args["top_k"], generating_args["temperature"]
+        generating_kwargs = llamaCppEngine._process_args(
+            messages, generating_args["top_p"], generating_args["top_k"], generating_args["temperature"],
+            generating_args["max_tokens"]
         )
 
         gen_kwargs = {
@@ -106,7 +102,7 @@ class llamaCppEngine(BaseEngine):
 
         streamer = TextIteratorStreamer(tokenizer, skip_prompt=True)
         gen_kwargs["streamer"] = streamer
-        thread = Thread(target=llamaCppQwen.run_llama_cpp, kwargs=gen_kwargs, daemon=True)
+        thread = Thread(target=llamaCppEngine.run_llama_cpp, kwargs=gen_kwargs, daemon=True)
         thread.start()
 
         def stream():

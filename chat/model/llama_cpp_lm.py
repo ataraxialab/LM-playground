@@ -38,7 +38,7 @@ from llama_cpp.llama_cache import (
 )
 from llama_cpp.llama_tokenizer import BaseLlamaTokenizer, LlamaTokenizer
 import llama_cpp.llama_cpp as llama_cpp
-import chat.llama_chat_format_lm as llama_chat_format
+import chat.model.llama_chat_format_lm as llama_chat_format
 
 from llama_cpp.llama_speculative import LlamaDraftModel
 

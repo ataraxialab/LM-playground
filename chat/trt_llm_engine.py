@@ -1,8 +1,6 @@
 from tensorrt_llm.runtime import ModelRunnerCpp
 from .base_engine import BaseEngine
-
 from tensorrt_llm.builder import get_engine_version
-
 import csv
 import numpy as np
 from pathlib import Path
@@ -10,9 +8,7 @@ from pathlib import Path
 import tensorrt_llm
 import tensorrt_llm.profiler
 from tensorrt_llm.logger import logger
-
 from tensorrt_llm.runtime import PYTHON_BINDINGS
-
 
 import asyncio
 import concurrent.futures
@@ -39,7 +35,6 @@ DEFAULT_PROMPT_TEMPLATES = {
     'QWenForCausalLM':
     "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{input_text}<|im_end|>\n<|im_start|>assistant\n",
 }
-
 
 
 if TYPE_CHECKING:
