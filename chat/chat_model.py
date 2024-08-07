@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, Generator, List, Op
 from .hparams import get_infer_args
 from .hf_engine import HuggingfaceEngine
 from .vllm_engine import VllmEngine
-from .trt_llm_engine import TrtLLMEngine
+# from .trt_llm_engine import TrtLLMEngine
+from .llama_cpp_engine import llamaCppEngine
 
 
 if TYPE_CHECKING:
@@ -26,6 +27,8 @@ class ChatModel:
             self.engine: "BaseEngine" = VllmEngine(model_args, data_args, finetuning_args, generating_args)
         elif model_args.infer_backend == "trt-llm":
             self.engine: "BaseEngine" = TrtLLMEngine(model_args, data_args, finetuning_args, generating_args)
+        elif model_args.infer_backend == "llama-llm":
+            self.engine: "BaseEngine" = llamaCppEngine(model_args, data_args, finetuning_args, generating_args)
         else:
             raise NotImplementedError("Unknown backend: {}".format(model_args.infer_backend))
 
