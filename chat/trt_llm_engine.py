@@ -34,6 +34,8 @@ DEFAULT_PROMPT_TEMPLATES = {
     "<|im_end|>\n<|im_start|>user\n{input_text}<|im_end|>\n<|im_start|>assistant\n",
     'QWenForCausalLM':
     "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{input_text}<|im_end|>\n<|im_start|>assistant\n",
+    'default':
+    "Human: {input_text}\nAssistant: ",
 }
 
 
@@ -232,8 +234,11 @@ class TrtLLMEngine(BaseEngine):
         generating_args.bad_words_list = self.bad_words_list
 
         self.prompt_template = None
-        if  model_name in DEFAULT_PROMPT_TEMPLATES:
-            self.prompt_template = DEFAULT_PROMPT_TEMPLATES[model_name]
+        if  data_args.template in DEFAULT_PROMPT_TEMPLATES:
+            self.prompt_template = DEFAULT_PROMPT_TEMPLATES[data_args.template]
+        else:
+            if model_name in DEFAULT_PROMPT_TEMPLATES:
+                self.prompt_template = DEFAULT_PROMPT_TEMPLATES[model_name]
 
         config  = {}
         engine_dir = Path(model_args.model_name_or_path)
@@ -242,7 +247,7 @@ class TrtLLMEngine(BaseEngine):
             import json
             config = json.load(f)
 
-
+        self.max_input_len = config['build_config']["max_input_len"]
 
         self.runner_kwargs = {
             'engine_dir': model_args.model_name_or_path,
@@ -410,7 +415,7 @@ class TrtLLMEngine(BaseEngine):
             'batch_input_ids': batch_input_ids,
             "input_lengths": input_lengths,
             "encoder_input_ids": None,
-            "max_new_tokens": max_input_length,
+            "max_new_tokens": genaration_kwargs.max_length,
             "max_attention_window_size": genaration_kwargs.trt_max_attention_window_size,
             "sink_token_length": genaration_kwargs.trt_sink_token_length,
             "end_id": genaration_kwargs.end_id,
@@ -466,6 +471,7 @@ class TrtLLMEngine(BaseEngine):
             model_name, 
             model_version, 
             pad_id, 
+            max_input_len: 923,
             messages: Sequence[Dict[str, str]],
             generating_args: Dict[str, Any],
             system: Optional[str] = None,
@@ -478,6 +484,7 @@ class TrtLLMEngine(BaseEngine):
                                                     model_version,
                                                     pad_id,
                                                     generating_args,
+                                                    max_input_length=max_input_len,
                                                     messages = messages)
 
 
@@ -516,6 +523,7 @@ class TrtLLMEngine(BaseEngine):
             self.model_name,
             self.model_version,
             self.pad_id,
+            self.max_input_len,
             messages,
             self.generating_args,
             system,
