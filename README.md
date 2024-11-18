@@ -58,7 +58,7 @@ python demo_VlAutoTraining.py
 git lfs install
 git lfs clone https://hf-mirror.com/shibing624/text2vec-base-chinese
 
-
+smmc cp ali_ hz/personal-oss/yangdecheng/models/qwen2-7b-ppo200-new-1.tar .
 `
 
 ## convert model to trt engine 
